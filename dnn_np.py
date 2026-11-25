@@ -1,4 +1,10 @@
 import numpy as np
+import matplotlib
+if matplotlib.get_backend().lower().startswith('qt'):
+    try:
+        matplotlib.use('TkAgg')
+    except Exception:
+        pass
 import matplotlib.pyplot as plt
 from util import *
 from activation_np import *
@@ -7,7 +13,7 @@ import pdb
 
 
 class Config(object):
-    def __init__(self, num_epoch=1000, batch_size=100, learning_rate=0.0005, momentum_rate=0.9, epochs_to_draw=10, reg=0.00015, num_train=1000, visualize=True):
+    def __init__(self, num_epoch=200, batch_size=200, learning_rate=0.005, momentum_rate=0.9, epochs_to_draw=10, reg=0.00015, num_train=1000, visualize=True):
         self.num_epoch = num_epoch
         self.batch_size = batch_size
         self.learning_rate = learning_rate
@@ -39,16 +45,18 @@ class Layer(object):
         :param x: input
         """
         # [TODO 1.2]
+
+        z = np.dot(x, self.w)
         
         # Compute different types of activation
         if (self.activation == 'sigmoid'):
-            result = sigmoid(x)
+            result = sigmoid(z)
         elif (self.activation == 'relu'):
-            result = reLU(x)
+            result = reLU(z)
         elif (self.activation == 'tanh'):
-            result = tanh(x)
+            result = tanh(z)
         elif (self.activation == 'softmax'):
-            result = softmax_minus_max(x)
+            result = softmax_minus_max(z)
 
         self.output = result
         return result
@@ -62,16 +70,18 @@ class Layer(object):
         """
         # [TODO 1.2]
         if(self.activation == 'sigmoid'):
-            w_grad = sigmoid_grad()
-        
+            delta = delta_dot_w_prev * sigmoid_grad(self.output)
         elif(self.activation == 'tanh'):
-           w_grad = tanh_grad()
-
+            delta = delta_dot_w_prev * tanh_grad(self.output)
         elif(self.activation == 'relu'):
-           w_grad = None 
+            delta = delta_dot_w_prev * reLU_grad(self.output)
+        elif(self.activation == 'softmax'):
+            delta = delta_dot_w_prev
+
+        w_grad = np.dot(x.T, delta)
 
         # [TODO 1.4] Implement L2 regularization on weights here
-        w_grad +=  0
+        w_grad += self.reg * self.w
         return w_grad, delta.copy()
 
 
@@ -124,11 +134,24 @@ class NeuralNet(object):
         """
 
         # [TODO 1.3]
+        if y.ndim == 1:
+            y = create_one_hot(y, self.num_class)
+        elif y.ndim == 2 and y.shape[1] == 1:
+            y = create_one_hot(y.flatten().astype(int), self.num_class)
+
+        # Handle binary classification case where y_hat is 1D or has 1 column
+        if y_hat.ndim == 1:
+            y_hat = np.column_stack([1.0 - y_hat, y_hat])
+        elif y_hat.ndim == 2 and y_hat.shape[1] == 1:
+            y_hat = np.column_stack([1.0 - y_hat.flatten(), y_hat.flatten()])
+
         # Estimating cross entropy loss from y_hat and y 
-        data_loss = 0
+        eps = 1e-12
+        y_hat_clipped = np.clip(y_hat, eps, 1.0 - eps)
+        data_loss = -np.sum(y * np.log(y_hat_clipped)) / y.shape[0]
 
         # Estimating regularization loss from all layers
-        reg_loss = 0.0
+        reg_loss = 0.5 * sum([layer.reg * np.sum(np.square(layer.w)) for layer in self.layers])
         data_loss += reg_loss
 
         return data_loss
@@ -139,26 +162,32 @@ class NeuralNet(object):
         :param y: the label, the actual class of the samples. e.g. 3-class classification with 9 data samples y = [0 0 0 1 1 1 2 2 2]
         :param all_x: input data and activation from every layer
         """
+        if y.ndim == 1:
+            y = create_one_hot(y, self.num_class)
+        elif y.ndim == 2 and y.shape[1] == 1:
+            y = create_one_hot(y.flatten().astype(int), self.num_class)
         
         # [TODO 1.5] Compute delta factor from the output
-        delta = 0
+        y_hat = all_x[-1]
+        delta = y_hat - y
         delta /= y.shape[0]
         
         # [TODO 1.5] Compute gradient of the loss function with respect to w of softmax layer, use delta from the output
-        grad_last = 0
+        grad_last = np.dot(all_x[-2].T, delta) + self.layers[-1].reg * self.layers[-1].w
 
         grad_list = []
         grad_list.append(grad_last)
         
+        delta_prev = delta.copy()
         for i in range(len(self.layers) - 1)[::-1]:
             prev_layer = self.layers[i+1]
             layer = self.layers[i]
             x = all_x[i]
-	    # [TODO 1.5] Compute delta_dot_w_prev factor for previous layer (in backpropagation direction)
-	    # delta_prev: delta^(l+1), in the start of this loop, delta_prev is also delta^(L) or delta_last
-	    # delta_dot_w_prev: delta^(l+1) dot product with w^(l+1)T
-            delta_dot_w_prev = 0
-	    # Use delta_dot_w_prev to compute delta factor for the next layer (in backpropagation direction)
+            # [TODO 1.5] Compute delta_dot_w_prev factor for previous layer (in backpropagation direction)
+            # delta_prev: delta^(l+1), in the start of this loop, delta_prev is also delta^(L) or delta_last
+            # delta_dot_w_prev: delta^(l+1) dot product with w^(l+1)T
+            delta_dot_w_prev = np.dot(delta_prev, prev_layer.w.T)
+            # Use delta_dot_w_prev to compute delta factor for the next layer (in backpropagation direction)
             grad_w, delta_prev = layer.backward(x, delta_dot_w_prev)
             grad_list.append(grad_w.copy())
 
@@ -254,7 +283,48 @@ def minibatch_train(net, train_x, train_y, cfg):
     :param cfg: Config object
     """
     # [TODO 1.6] Implement mini-batch training
-    pass
+    num_train = cfg.num_train[0] if isinstance(cfg.num_train, (tuple, list)) else cfg.num_train
+    train_set_x = train_x[:num_train].copy()
+    train_set_y = train_y[:num_train].copy()
+    if train_set_y.ndim == 1 or (train_set_y.ndim == 2 and train_set_y.shape[1] == 1):
+        train_set_y = create_one_hot(train_set_y.flatten().astype(int), net.num_class)
+    all_loss = []
+    
+    num_samples = train_set_x.shape[0]
+    batch_size = cfg.batch_size
+
+    for e in range(cfg.num_epoch):
+        indices = np.random.permutation(num_samples)
+        shuffled_x = train_set_x[indices]
+        shuffled_y = train_set_y[indices]
+
+        for start_idx in range(0, num_samples, batch_size):
+            end_idx = min(start_idx + batch_size, num_samples)
+            batch_x = shuffled_x[start_idx:end_idx]
+            batch_y = shuffled_y[start_idx:end_idx]
+
+            all_x = net.forward(batch_x)
+            grads = net.backward(batch_y, all_x)
+            
+            if cfg.momentum_rate > 0:
+                net.update_weight_momentum(grads, cfg.learning_rate, cfg.momentum_rate)
+            else:
+                net.update_weight(grads, cfg.learning_rate)
+
+        all_x = net.forward(train_set_x)
+        y_hat = all_x[-1]
+        loss = net.compute_loss(train_set_y, y_hat)
+        all_loss.append(loss)
+
+        if (e % cfg.epochs_to_draw == cfg.epochs_to_draw - 1):
+            if (cfg.visualize):
+                y_hat = net.forward(train_x[0::3])[-1]
+                visualize_point(train_x[0::3], train_y[0::3], y_hat)
+            plot_loss(all_loss, 2)
+            plt.show()
+            plt.pause(0.01)
+
+        print("Epoch %d: loss is %.5f" % (e+1, loss))
     
 
 
@@ -268,9 +338,11 @@ def batch_train(net, train_x, train_y, cfg):
     :param cfg: Config object
     """
 
-    train_set_x = train_x[:cfg.num_train].copy()
-    train_set_y = train_y[:cfg.num_train].copy()
-    train_set_y = create_one_hot(train_set_y, net.num_class)
+    num_train = cfg.num_train[0] if isinstance(cfg.num_train, (tuple, list)) else cfg.num_train
+    train_set_x = train_x[:num_train].copy()
+    train_set_y = train_y[:num_train].copy()
+    if train_set_y.ndim == 1 or (train_set_y.ndim == 2 and train_set_y.shape[1] == 1):
+        train_set_y = create_one_hot(train_set_y.flatten().astype(int), net.num_class)
     all_loss = []
 
     for e in range(cfg.num_epoch):
@@ -308,7 +380,7 @@ def bat_classification():
     test_x = add_one(test_x)
 
     # Define hyper-parameters and train-related parameters
-    cfg = Config(num_epoch=1000, learning_rate=0.001, num_train=train_x.shape[0])
+    cfg = Config(num_epoch=200, batch_size=200, learning_rate=0.005, epochs_to_draw=200, num_train=train_x.shape[0])
 
     # Create NN classifier
     num_hidden_nodes = 100
@@ -348,7 +420,7 @@ def mnist_classification():
     test_x = add_one(test_x)
 
     # Define hyper-parameters and train-related parameters
-    cfg = Config(num_epoch=300, learning_rate=0.001, batch_size=200, num_train=train_x.shape, visualize=False)
+    cfg = Config(num_epoch=60, learning_rate=0.001, batch_size=200, epochs_to_draw=60, num_train=train_x.shape[0], visualize=False)
 
     # Create NN classifier
     num_hidden_nodes = 100
@@ -378,4 +450,6 @@ if __name__ == '__main__':
     bat_classification()
     mnist_classification()
 
-    pdb.set_trace()
+    import sys
+    if sys.stdin.isatty():
+        pdb.set_trace()
